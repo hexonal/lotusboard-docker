@@ -1,0 +1,25 @@
+version: '3'
+services:
+  v2board:
+    image: ghcr.io/lotusnetwork/sakuraneko
+    volumes:
+      - './lotusboard:/www'
+      - './wwwlogs:/wwwlogs'
+      - './caddy.conf:/run/caddy/caddy.conf'
+      - './supervisord.conf:/run/supervisor/supervisord.conf'
+      - './crontabs.conf:/etc/crontabs/root'
+      - './.caddy:/root/.caddy'
+  
+    restart: always 
+    ports:
+      - '84:80'
+#      - '443:443'
+
+
+
+
+
+
+
+
+

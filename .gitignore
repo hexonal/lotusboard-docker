@@ -1,0 +1,7 @@
+wwwlogs/
+.caddy/
+*.bak
+*.bak.*
+*.bak_*
+core
+.DS_Store

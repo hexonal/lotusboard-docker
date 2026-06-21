@@ -1,4 +1,8 @@
 [submodule "lotusboard"]
 	path = lotusboard
-	url = https://github.com/lotusnetwork/lotusboard.git
-    branch = main
+	url = git@github.com:hexonal/lotusboard.git
+	branch = ix-customizations
+[submodule "SakuraNeko"]
+	path = SakuraNeko
+	url = git@github.com:hexonal/SakuraNeko.git
+	branch = main
