@@ -1,7 +1,7 @@
 [submodule "lotusboard"]
 	path = lotusboard
 	url = git@github.com:hexonal/lotusboard.git
-	branch = ix-wyx-merge
+	branch = main
 [submodule "SakuraNeko"]
 	path = SakuraNeko
 	url = git@github.com:hexonal/SakuraNeko.git
