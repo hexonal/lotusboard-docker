@@ -1,0 +1,9 @@
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+APP_DISABLE_CONFIG_CACHE=true
+APP_CONFIG_CACHE=/runtime/cache/config.php
+APP_SERVICES_CACHE=/runtime/cache/services.php
+APP_PACKAGES_CACHE=/runtime/cache/packages.php
+APP_ROUTES_CACHE=/runtime/cache/routes.php
+APP_EVENTS_CACHE=/runtime/cache/events.php
+VIEW_COMPILED_PATH=/runtime/views
+* * * * * /usr/local/bin/php /www/artisan schedule:run >> /proc/1/fd/1 2>&1

@@ -1,0 +1,2 @@
+/www/config/v2board.php
+/www/config/theme/*

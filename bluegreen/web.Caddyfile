@@ -1,0 +1,12 @@
+{
+    admin off
+    grace_period 120s
+}
+:80 {
+    root * /www/public
+    @internal path /fpm-status /fpm-ping
+    respond @internal 404
+    php_fastcgi unix//tmp/php-cgi.sock
+    try_files {path} {path}/ /index.php?{query}
+    file_server
+}

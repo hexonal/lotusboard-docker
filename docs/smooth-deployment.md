@@ -1,100 +1,133 @@
-# 面板平滑部署方案
+# 面板蓝绿部署
 
-这是一份基于现网核验的部署设计，尚未把生产入口改造成蓝绿部署。
-当前 PHP 8.4 容器和路由继续按已验证配置运行。
+2026-11-09 已在日本面板服务器部署。运行 PHP 8.4.27，数据库没有迁移。
 
-## 现网及限制
-
-活动项目为 `/root/docker-compose/docker-compose.yaml`，服务和容器均为
-`v2board-new`。该容器同时运行 Caddy、PHP-FPM、Horizon、4 个邮件队列进程和 cron。
-宿主机 `84:80` 直接发布这个容器；应用、vendor、日志和定时任务使用宿主机 bind mount。
-
-现场确认了两种入口：
-
-- 宿主机 `127.0.0.1:84`：本机 v2node 使用它读取面板配置，host 网络下的隧道也可能使用宿主机入口。
-- Docker 网络 `v2board-new:80`：Nginx Proxy Manager 的 `v2.996icu.wiki` 站点引用此地址。
-
-因此，仅给公网 Nginx 更换 upstream 不足以覆盖全部入口。仅增加停机等待时间，或
-`docker compose up --force-recreate`，也不会让同一个 84 端口的容器替换变成无中断。
-
-## 推荐结构
+## 现网结构
 
 ```text
-公网 Nginx / 隧道 / 本机 v2node
-                  |
-     固定网关（宿主机 :84，Docker 别名 v2board-new:80）
-                  |
-        blue-web 或 green-web
-        每个版本有独立源码及 vendor
-
-独立 worker + 唯一 scheduler → 共用现有 Redis 和数据库
+公网隧道 / Nginx Proxy Manager / 本机 v2node
+                         |
+v2board-new 固定 Caddy 网关（宿主机 :84，172.18.0.9 / 2001:db8::9）
+                         |
+         v2board-web-blue 或 v2board-web-green
+                         |
+       当前槽位的 worker + 唯一 scheduler
 ```
 
-固定网关与应用分开维护；后续发布应用版本时，不替换网关容器。
-网关可以使用独立 Caddy 或 Nginx。使用 Caddy 时需要允许容器内部的本地管理接口，
-然后通过 `caddy reload` 切换 upstream；现有应用 Caddy 配置有 `admin off`，不能
-直接把它当作支持 reload 的网关。管理端口只在网关内部监听，不发布到宿主机。
+网关仍由 `/root/docker-compose/docker-compose.yaml` 管理，只运行 Caddy。
+应用由独立项目 `lotusboard-bg` 管理，配置和脚本在
+`/root/lotusboard-docker-new/bluegreen/`，源码对应本仓库 `bluegreen/`。
+两个 web 均可保留运行，后台角色仅活动槽位运行。web 不发布宿主机端口。
+网关管理端口仅在容器内部 `127.0.0.1:2019` 监听。
 
-网关必须同时继承宿主机 84 端口和 Docker 别名 `v2board-new`。
-当前应用正占用它们，因此第一次引入网关需要一次受控切换，不能宣称这一步已经零中断。
-公网 Host、原始协议和可信代理链需要验证，以免产生错误的回调地址或重定向。
-Nginx 当前使用字面量 `proxy_pass http://v2board-new:80`，切换 Docker 别名后，
-还要用 `nginx -t` 和平滑 reload 刷新其 upstream 解析；不能假设它立即跟随新容器 IP。
-保留旧 IP 时必须先释放旧容器的网络地址，避免新旧 endpoint 冲突。
+网关通过 `caddy reload` 切换 upstream，应用发布不重建网关，也不更换 :84、Docker
+别名或 IP。响应头 `X-Deployment-Slot` 用于核验实际槽位。首次引入网关需要受控替换
+原容器，现场探针观察到约 3.4 秒的失败采样窗口；后续切换另行验收，不能把首次接管
+说成无中断。Nginx 已执行配置检查和 graceful reload。
 
-## 发布过程
+## 发布及回退
 
-1. 为新提交建立独立 release 目录，构建完整的源码和 vendor。
-   使用仓库内的 `composer.lock` 执行 `composer install --no-dev`，不要在活动
-   `/www/vendor` 上运行 `composer update` 或直接覆盖 vendor。
-   默认 Composer scripts 可能加载应用；构建应使用隔离环境，或先 `--no-scripts`，
-   再在新 release 中有控制地执行 package discovery。
-2. 启动新 web 槽位，先设置 `RUN_WORKERS=false`、`RUN_SCHEDULER=false`。
-   新旧 web 使用不同的 release 和容器名，不争抢 84 端口。数据库和 Redis 沿用现网。
-3. 在新版本上检查扩展、Composer 平台要求、应用启动、数据库/Redis、订阅格式、
-   登录校验、Stripe 签名和节点 API。PHP-FPM ping 只证明进程存活，不能代替这些就绪检查。
-4. 验证新 upstream 配置后，平滑 reload 固定网关，使新请求进入新 web。
-   保留旧 web，等待其在途请求完成，不立即停止旧容器。
-5. 交接后台角色：停止旧 scheduler，等待当前 schedule invocation 完成；
-   对旧 worker 的 Supervisor 程序执行受控停止，等已领取的任务完成，再启动新 worker。
-   使用独立的 worker/scheduler 服务配置；不要只在容器内临时改开关，否则重启后角色会漂移。
-6. 核验新 web、worker、scheduler、节点拉取、队列积压和公网响应，保留旧 release
-   及对应运行镜像用于回退。旧 web 完成请求排空后才可以停止。
+在服务器运行以下脚本。先用 `status` 确定活动槽位，`prepare` 只能操作非活动槽位。
+示例假设活动为 blue；发布到 green：
 
-当前 Supervisor 程序名为 `horizon`、`v2board:v2board_00` 至 `_03`、`cron`。
-可用 `supervisorctl -c /etc/supervisor/lotusboard.conf` 精确控制当前容器内的角色。
-`horizon:terminate` 会让当前任务完成后退出，但当前 Supervisor 会自动拉起它；
-交接版本时不能依靠它来永久停掉旧 worker，也不要同时广播给新旧 Horizon。
+```sh
+cd /root/lotusboard-docker-new/bluegreen
+python3 manage.py status
+python3 manage.py prepare green release-<唯一版本号> --source /root/lotusboard-build/<版本号> --image <已构建的运行镜像>
+python3 manage.py promote green
+python3 manage.py status
+```
 
-## 等待时间与共享状态
+`--source` 指向已准备完整源码和 vendor 的独立构建目录。按应用的 `composer.lock`
+执行 `composer install --no-dev --no-scripts`，不能在活动 release 上执行 Composer
+或替换 vendor。使用目标 PHP 镜像构建依赖，不使用宿主机其他版本 PHP。脚本把镜像
+解析为本地不可变 image ID。省略 `--source` 时会复制原生产目录，仅适合初次迁移和
+复用现有已验证版本，不代表自动拉取 Git 最新提交。
 
-- worker 当前设置了 `stopwaitsecs=120`；Compose 的 `stop_grace_period` 应配置为
-  至少 150 秒，避免 Docker 默认的 10 秒早于 Supervisor 的排空时间。
-- PHP-FPM 需要优雅停止时使用 QUIT，并配置足够的等待时间；当前镜像没有把容器
-  停止等同于 HTTP 请求排空。旧 web 应在网关已切走、请求排空之后才停止。
-- 队列任务 timeout 必须短于 Redis `retry_after`；原队列当前是 90 秒，不能为了
-  部署把任务无限延长，造成任务在旧 worker 尚未结束时被再次领取。
-- 用户上传文件、现有文件缓存及认证会话需要保留，Redis 也继续使用原实例。
-  当前 AuthService 的登录会话依赖缓存，部署时不要直接 `cache:clear`。
-- Blade 编译目录和 `bootstrap/cache` 应按 release 隔离。可以为各 web 槽位指定
-  独立 `VIEW_COMPILED_PATH`，避免新旧代码共用同一路径的编译视图。
-- Docker bind mount 按发布目录创建。不能假设更换宿主机上的 `current` 软链接，
-  已运行容器的 `/www` 就会自动切换到新目录；每个槽位应绑定明确的 release 路径。
-- 数据库迁移另行采用向前、向后兼容的扩展/收缩过程。回滚 web 不会回滚数据库；
-  此次 PHP 升级没有执行数据库迁移。
+`prepare` 为版本建立独立目录，等待非活动 web 的连接排空，再启动该槽位 web。
+它不启动后台角色，先检查健康、Composer 平台要求和生产就绪检查。准备失败不会切换入口。
+版本目录不复用、不覆盖；旧版本保留用于追溯。
 
-## 回滚
+`promote` 再次检查就绪后，依次停止旧 scheduler、等待当前调度结束、排空旧 worker，
+验证并重载网关，启动新 worker 和 scheduler，最后从网关做完整检查。
+成功后原子保存活动槽位及 Compose 重启策略。失败时自动恢复旧入口和后台角色。
+交接期间网页仍由 web 提供，队列领取和调度会短暂停顿；不会同时启动两套定时任务。
 
-在 schema 和任务载荷兼容的前提下，把网关 upstream reload 回旧 web，
-待新 worker 的在途任务完成后，再交还 worker 和 scheduler 所有权。
-不要在旧进程还运行时，把其 vendor 替换为新版本。
+回退到仍保留的 blue：
 
-已经部署的 PHP 7.4 回退仍使用 `SakuraNeko/php84/rollback-php74.sh`，那是一次
-容器及 vendor 回退，存在切换窗口，不能冒充上述蓝绿 web 回滚。
+```sh
+python3 manage.py promote blue
+```
+
+回退使用相同的就绪检查和后台角色交接，不回滚数据库。仅在代码、任务载荷与数据库
+兼容时使用。未来涉及 schema 的发布需另行采用兼容迁移；本次没有执行迁移。
+
+被强制中断的交接会留下 `handoff.json`，阻止直接继续发布。恢复最后确认的活动槽位：
+
+```sh
+python3 manage.py recover
+```
+
+脚本使用文件锁防止并发发布。不要直接执行两套 background profiles 的 `up`。
+非活动后台容器的重启策略为 `no`，活动后台为 `always`，web 为 `always`。
+Compose 的 profiles 防止普通 `up -d` 意外启动两套 scheduler。
+
+## 共享数据与关停
+
+源码及 vendor 按 release 只读挂载；以下数据共享原生产位置：`.env`、storage、
+后台 `config/v2board.php`、`config/theme/`、`public/theme/` 和订阅 `resources/rules/`。
+因此现有订阅模板更新、上传、登录文件缓存和后台设置仍然有效。
+各角色分别使用 `/runtime/cache` 和 `/runtime/views`，避免编译视图跨版本混用。
+
+`APP_DISABLE_CONFIG_CACHE=true` 使后台设置、主题及更新命令清理本槽位配置缓存，
+从共享 PHP 配置读取最新设置；普通部署仍保留原 `config:cache` 行为。
+共享后台配置和主题配置加入 OPcache blacklist，避免其他 FPM 池继续使用旧设置。
+新主题初始化直接更新本次请求内的配置，避免等待缓存而进入无限循环。
+不要手工执行 `config:cache` 或全局 `cache:clear`；后者会影响文件缓存中的登录会话。
+
+镜像继承 PHP 的默认 `SIGQUIT`，后台包装脚本需要显式 `SIGTERM`。应用 Compose
+已声明 `stop_signal: SIGTERM`，发布脚本停止后台时也显式发送 TERM。
+worker 的 Supervisor 等待在途任务最多 120 秒，Docker 等待 150 秒；scheduler
+先停止 cron，再等待已有 `schedule:run`。专用 crontab 显式配置 PHP 的绝对路径、PATH
+以及每个角色的缓存目录环境；Debian cron 不会自动继承 Docker 的这些变量。健康检查
+要求调度心跳晚于本容器启动时间且不超过 90 秒，不能只检查 cron 进程。web 停止时
+PHP-FPM 使用 QUIT。
+旧 web 在网关切走后保留运行，准备下个版本前等待连接排空，超时则拒绝覆盖。
+
+不要无限延长队列任务 timeout：当前 Redis retry_after 为 90 秒，任务 timeout 应更短，
+否则任务可能被重复领取。部署不修改这些队列语义。
+
+## 验证及证据
+
+```sh
+python3 manage.py verify blue --gateway
+```
+
+当前就绪检查共 56 项，包含扩展、数据库 SELECT、隔离 Redis 键、队列访问、密码散列、
+JWT、加密、Markdown、邮件 MIME、合成 Stripe 签名与回调解析、登录校验、五种订阅格式
+和后端节点配置。不会发送邮件、创建真实支付或输出用户订阅 token。
+
+`exercise.py` 会实际切到另一槽位再回退，同时探测 :84、公网隧道和公网 Nginx，
+并校验切换期间慢速下载的完整性。它会改变活动槽位，应仅在受控验收中运行。
+现场证据保存在服务器 `migration-evidence.json`、`exercise-evidence.json` 和
+`verification-*.json`，这些文件和 state/release/runtime 均不入 Git。
+实际结果见 [部署验收记录](deployment-20261109.md)。
+
+尚未验证真实购买、邮件送达和完整交互登录。Laravel 仍为 8.83.29，框架与依赖的后续
+升级不包含在这次部署中。
+
+## 原单容器及 PHP 7.4 回退
+
+初次接管前的 Compose 和 inspect 保存在 `bluegreen/backups/<时间>/`。
+如需恢复原单容器，必须先受控停止蓝绿的后台角色，再恢复原 Compose 的面板服务并
+重建；不能让原容器和蓝绿 scheduler 同时运行。原应用及 vendor 保留在旧目录。
+
+旧 PHP 7.4 镜像和 vendor 快照继续保留，但 `rollback-php74.sh` 现在会拒绝直接操作
+网关。必须先恢复原单容器拓扑，才能使用该脚本回退 PHP；普通应用回退使用 `promote`。
 
 ## 参考
 
-- [Nginx 配置重载与旧请求处理](https://nginx.org/en/docs/control.html)
 - [Caddy 平滑配置重载](https://caddyserver.com/docs/getting-started#reloading-config)
-- [Docker bind mount 行为](https://docs.docker.com/engine/storage/bind-mounts/)
-- [Laravel Horizon 部署和优雅退出](https://laravel.com/docs/8.x/horizon#deploying-horizon)
+- [Nginx 配置重载](https://nginx.org/en/docs/control.html)
+- [Docker bind mount](https://docs.docker.com/engine/storage/bind-mounts/)
+- [Laravel Horizon 优雅部署](https://laravel.com/docs/8.x/horizon#deploying-horizon)

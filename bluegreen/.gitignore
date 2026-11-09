@@ -1,0 +1,11 @@
+__pycache__/
+.deploy.lock
+state.json
+handoff.json
+compose.json
+runtime/
+releases/
+gateway/
+backups/
+verification-*.json
+*-evidence.json
